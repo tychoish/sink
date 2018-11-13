@@ -12,35 +12,69 @@ import (
 	"github.com/mongodb/mongo-go-driver/bson"
 )
 
+const (
+	ten             = 10
+	hundred         = ten * ten
+	thousand        = ten * hundred
+	hundredThousand = hundred * thousand
+	million         = ten * hundredThousand
+)
+
 func main() {
 	point := model.PerformancePoint{}
 	startAt := time.Now()
 	file, err := os.Create("metrics_mock.ftdc")
 	grip.EmergencyFatal(err)
+	bucketSize := 100, 000
+	totalOps := int64(50 * 1000 * 60 * 20)
 
-	collector := ftdc.NewStreamingCollector(1000, file)
+	var rawSize int64
+
+	collector := ftdc.NewStreamingCollector(bucketSize, file)
+	defer func() {
+		stat, err := os.Stat("metrics_mock.ftdc")
+		grip.EmergencyFatal(err)
+
+		grip.Info(message.Fields{
+			"dur_secs":    time.Since(startAt).Seconds(),
+			"bucket_size": bucketSize,
+			"t":           totalOps,
+			"raw_bytes":   rawSize,
+			"size_bytes":  stat.Size(),
+		})
+	}()
 	defer func() { grip.EmergencyFatal(file.Close()) }()
 	defer func() { ftdc.FlushCollector(collector, file) }()
 
-	totalOps := int64(44 * 1000 * 60 * 60 * 15)
-
+	grip.Info(message.Fields{
+		"n":            0,
+		"t":            totalOps,
+		"bucket":       bucketSize,
+		"info.metrics": collector.Info().MetricsCount,
+		"info.samples": collector.Info().SampleCount,
+	})
 	for i := int64(1); i <= totalOps; i++ {
 		point.Timestamp = startAt.Add(time.Duration(i) * time.Second)
 		point.Counters.Number = i
 		point.Counters.Operations += i * rand.Int63n(10)
-		point.Counters.Size += i * rand.Int63n(1000)
 
-		point.Timers.Duration += time.Millisecond * time.Duration(i-1*rand.Int63n(100))
-		point.Timers.Total += time.Millisecond * time.Duration(i*rand.Int63n(100))
+		if i%hundred == 0 {
+			point.Counters.Size += i * rand.Int63n(10)
+		}
+
+		dur := time.Millisecond * time.Duration(i-1*rand.Int63n(100))
+		point.Timers.Duration += dur - time.Duration(i*rand.Int63n(75))
+		point.Timers.Total += dur
 
 		point.Guages.Workers = 1
-		if i&1000 == 0 {
+		if i&hundredThousand == 0 {
 			point.Guages.State++
 		}
-		grip.InfoWhen(i%100000 == 0,
+
+		grip.InfoWhen(i%int64(bucketSize) == 0,
 			message.Fields{
 				"n":            i,
-				"t":            totalOps,
+				"millions":     i / million,
 				"info.metrics": collector.Info().MetricsCount,
 				"info.samples": collector.Info().SampleCount,
 			})
@@ -49,6 +83,7 @@ func main() {
 		grip.EmergencyFatal(err)
 
 		doc, err := bson.ReadDocument(payload)
+		rawSize += int64(len(payload))
 		grip.EmergencyFatal(err)
 
 		err = collector.Add(doc)
